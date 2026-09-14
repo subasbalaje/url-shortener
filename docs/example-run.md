@@ -21,7 +21,7 @@ storage + tests + docs. Request:
 
 ---
 
-## 1. Load and validation (before anything executes)
+## 1. Load and validation (before anythgit ing executes)
 
 ```
 $ java -jar target/orchestrator-cli.jar run --graph docs/orchestration-graph.yaml \
