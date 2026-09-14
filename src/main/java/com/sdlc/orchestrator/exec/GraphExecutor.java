@@ -5,7 +5,6 @@ import com.sdlc.orchestrator.gates.CheckerRegistry;
 import com.sdlc.orchestrator.gates.ExpressionEvaluator;
 import com.sdlc.orchestrator.gates.GateEvaluator;
 import com.sdlc.orchestrator.gates.GateManager;
-import com.sdlc.orchestrator.gates.PolicyEngine;
 import com.sdlc.orchestrator.graph.GraphAlgorithms;
 import com.sdlc.orchestrator.lineage.DecisionLogger;
 import com.sdlc.orchestrator.lineage.EventType;
@@ -19,7 +18,6 @@ import com.sdlc.orchestrator.model.GraphSpec;
 import com.sdlc.orchestrator.model.NodeRuntime;
 import com.sdlc.orchestrator.model.NodeSpec;
 import com.sdlc.orchestrator.model.NodeState;
-import com.sdlc.orchestrator.model.RePlanTrigger;
 import com.sdlc.orchestrator.model.RollbackAction;
 import com.sdlc.orchestrator.model.Run;
 import com.sdlc.orchestrator.model.RunState;
@@ -97,9 +95,13 @@ public class GraphExecutor {
     // ======================================================================
 
     public Run runGraph(String rawRequest, String mode) throws IOException, InterruptedException {
+        return runGraph(rawRequest, mode, generateRunId());
+    }
+
+    public Run runGraph(String rawRequest, String mode, String runId) throws IOException, InterruptedException {
         stateLock.lock();
         try {
-            run = new Run(generateRunId(), graph.id(), mode, rawRequest);
+            run = new Run(runId, graph.id(), mode, rawRequest);
             run.setState(RunState.RUNNING);
             for (NodeSpec n : graph.nodes()) {
                 run.nodes().put(n.id(), new NodeRuntime(n.id()));
@@ -114,6 +116,11 @@ public class GraphExecutor {
         return mainLoop();
     }
 
+    public Run loadRun(Path stateJsonPath) throws IOException {
+        run = Run.load(stateJsonPath);
+        return run;
+    }
+
     /**
      * Resume a run that stopped at a human gate. This is the other half of
      * persist-and-exit (DEC-0007): the process that paused is gone. Everything
@@ -126,8 +133,6 @@ public class GraphExecutor {
         if (nodeId == null) {
             throw new IllegalStateException("Run " + run.runId() + " is not paused at a gate.");
         }
-        NodeSpec node = graph.node(nodeId);
-
         ApprovalRecord approval;
         try {
             approval = gateManager.recordDecision(runDir.resolve("pending_approval.json"), approvalResponsePath, run.runId());

@@ -1,7 +1,6 @@
 package com.sdlc.shortener.store;
 
 import com.sdlc.shortener.model.Link;
-import org.springframework.stereotype.Repository;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -17,7 +16,6 @@ import java.util.Optional;
  * gate exists to review. Try-with-resources on every {@code Connection}/
  * {@code PreparedStatement}; parameterized queries only.
  */
-@Repository
 public class SqliteLinkStore implements LinkStore {
 
     private final DataSource dataSource;

@@ -44,7 +44,7 @@ same change that implements something.
 | `exec/GraphExecutor` | ⬜ not yet created | ⬜ `TODO(impl)` | Main loop, dispatch, gates, failure ladder |
 | `gates/GateManager` | ⬜ not yet created | ⬜ `TODO(impl)` | Persist-and-exit, `resume()` |
 | `agents/*` | ⬜ not yet created | ⬜ `TODO(impl)` | Deterministic stub implementations first (§5 build order) |
-| `cli/OrchestratorCli` | ⬜ not yet created | ⬜ `TODO(impl)` | `run`, `resume`, `replan`, `status`, `validate`, `metrics` |
+| `cli/OrchestratorCli` | ✅ | ✅ implemented | `run`, `resume`, `replan`, `status`, `validate`, `metrics`; packaged as `target/orchestrator-cli.jar` |
 
 189 tests, all passing (`mvn test`); `mvn verify` also passes the 70% jacoco
 coverage gate on `com/sdlc/orchestrator/**` (trivially, at this stage — most of
@@ -192,7 +192,7 @@ changed artifacts; **preserve lineage for untouched nodes**.
 `apply_migration` is *not* staled by a `requirement_spec` change (it declares no
 trigger on it), and `preservedNodes` appears in the lineage entry.
 
-### 10. `cli/OrchestratorCli`
+### 10. `cli/OrchestratorCli` — implemented
 
 `run`, `resume`, `replan`, `status`, `validate`, `metrics`.
 
