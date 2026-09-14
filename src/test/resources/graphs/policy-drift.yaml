@@ -1,0 +1,18 @@
+# apply_migration performs a schema-changing action (produces migration_applied)
+# but declares requires_human_approval: false -- the DEC-0006 drift
+# architecture.md Sec7 risk 9 warns about.
+schema_version: "1.0"
+graph:
+  id: "policy-drift-fixture"
+  name: "Policy drift fixture"
+  artifacts:
+    migration_applied: { produced_by: apply_migration, type: json }
+nodes:
+  - id: apply_migration
+    name: "Apply database migration"
+    agent_role: implementation_agent
+    produces: [migration_applied]
+    requires_human_approval: false
+    rollback_action:
+      type: execute_sql
+      description: "Run the reviewed rollback SQL."

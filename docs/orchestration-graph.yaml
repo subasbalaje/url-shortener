@@ -1,0 +1,660 @@
+# =============================================================================
+# SDLC Orchestration Graph
+# =============================================================================
+# This file is the authoritative definition of the SDLC dependency graph.
+# It is DATA, not prose: orchestrator/executor.py runs purely off this file
+# with no hidden assumptions and no node behaviour hard-coded in Python.
+#
+# Contract with the executor:
+#   - Execution order is derived from `depends_on` via Kahn's algorithm.
+#     `can_run_parallel` is a CHECKED ASSERTION, never a scheduling instruction
+#     (DEC-0011). A mismatch between declared and computed parallelism is a
+#     load-time error, not a runtime behaviour.
+#   - `requires_human_approval` is cross-checked at load time against the
+#     high-impact criteria in DEC-0006. A node that meets a criterion but
+#     declares `false` fails validation.
+#   - A node is COMPLETED only when its agent succeeds AND its exit_gate passes.
+#   - Retry is a self-loop in the node state machine, not a graph edge. The
+#     edge set defined here must remain acyclic.
+#
+# Schema version is checked by graph_model.load_graph().
+# =============================================================================
+
+schema_version: "1.0"
+
+graph:
+  id: "sdlc-core"
+  name: "Full SDLC: requirements through release readiness"
+  description: >
+    Default graph used by all three scenarios. Scenarios differ by which nodes
+    execute (brownfield skips or short-circuits nodes whose artifacts are
+    unchanged), not by graph topology. See scenarios/*.md.
+
+  # ---------------------------------------------------------------------------
+  # Defaults inherited by every node unless overridden.
+  # Retry schema follows Temporal's five-field model (research-notes.md §1.1).
+  # ---------------------------------------------------------------------------
+  defaults:
+    retry_policy:
+      max_attempts: 3                 # total tries, not retries-after-first
+      initial_interval_seconds: 2
+      backoff_coefficient: 2.0        # 2s, 4s, 8s ...
+      max_interval_seconds: 60        # ceiling; stops unbounded growth
+      non_retryable_errors:           # permanent failures: retrying wastes time
+        - ValidationError             #   bad input will not become valid
+        - PolicyViolationError        #   guardrail breach must surface, not retry
+        - HumanRejectedError          #   a human said no; retrying is insubordination
+    timeout_seconds: 600
+    on_exhausted: "rollback_then_safe_stop"
+
+  # ---------------------------------------------------------------------------
+  # Artifact registry: the run-state keys nodes read and write.
+  # Declared explicitly so staleness propagation (§3.6) is computable rather
+  # than inferred from node names.
+  # ---------------------------------------------------------------------------
+  artifacts:
+    requirement_spec:     { produced_by: requirements,      type: json }
+    ambiguity_report:     { produced_by: requirements,      type: json }
+    design_doc:           { produced_by: design,            type: markdown }
+    api_schema:           { produced_by: design,            type: openapi }
+    impact_analysis:      { produced_by: design,            type: json }
+    migration_plan:       { produced_by: design,            type: json, nullable: true }
+    source_code:          { produced_by: implementation,    type: filetree }
+    migration_applied:    { produced_by: apply_migration,   type: json, nullable: true }
+    test_suite:           { produced_by: testing,           type: filetree }
+    test_results:         { produced_by: testing,           type: json }
+    documentation:        { produced_by: documentation,     type: filetree }
+    readiness_report:     { produced_by: release_readiness, type: json }
+
+nodes:
+
+  # ===========================================================================
+  # 1. REQUIREMENTS
+  # ===========================================================================
+  - id: requirements
+    name: "Requirement understanding and normalisation"
+    agent_role: requirements_agent
+    depends_on: []
+    can_run_parallel: []
+
+    produces: [requirement_spec, ambiguity_report]
+
+    entry_gate:
+      description: "A raw request must be present."
+      conditions:
+        - type: input_present
+          field: raw_request
+          error: "No requirement supplied; nothing to interpret."
+
+    exit_gate:
+      description: >
+        Reject an under-specified spec. This gate is what makes the ambiguous
+        scenario work: it FIRES and blocks progress rather than letting a vague
+        requirement flow downstream (scenarios/ambiguous.md).
+      conditions:
+        - type: field_non_empty
+          field: requirement_spec.acceptance_criteria
+          error: "No acceptance criteria: requirement is not testable."
+        - type: all_items_have_field
+          field: requirement_spec.acceptance_criteria
+          item_field: verifiable_by
+          error: "An acceptance criterion has no stated verification method."
+        - type: ambiguities_resolved_or_escalated
+          field: ambiguity_report
+          error: >
+            An ambiguity was neither resolved with a stated assumption nor
+            escalated to a human. Silent resolution is a governance failure.
+        - type: field_non_empty
+          field: requirement_spec.assumptions
+          allow_empty_if: "ambiguity_report.ambiguities == []"
+          error: "Assumptions list missing; assumptions must be explicit, not implied."
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    retry_policy:
+      max_attempts: 2       # a second pass with the gate's complaint as feedback
+      initial_interval_seconds: 1
+      backoff_coefficient: 2.0
+      max_interval_seconds: 10
+      non_retryable_errors: [PolicyViolationError, HumanRejectedError]
+
+    # Escalating to a human is the correct compensation for ambiguity the agent
+    # cannot resolve — not discarding work.
+    rollback_action:
+      type: escalate_to_human
+      description: "Surface unresolved ambiguity to a human for a decision."
+      writes: pending_clarification.json
+
+    re_plan_triggers: []    # root node: nothing upstream can invalidate it
+
+    metrics_tags: [stage:requirements, critical_path:true]
+
+  # ===========================================================================
+  # 2. DESIGN
+  # ===========================================================================
+  - id: design
+    name: "Architecture and technical design"
+    agent_role: design_agent
+    depends_on: [requirements]
+    can_run_parallel: []
+
+    produces: [design_doc, api_schema, impact_analysis, migration_plan]
+
+    entry_gate:
+      description: "Requires an approved, testable requirement spec."
+      conditions:
+        - type: artifact_present
+          artifact: requirement_spec
+          error: "Cannot design without a normalised requirement."
+        - type: upstream_state
+          node: requirements
+          equals: COMPLETED
+          error: "Requirements node has not passed its exit gate."
+
+    exit_gate:
+      description: >
+        Design must be actionable and must SURFACE high-impact actions rather
+        than bury them. The impact-analysis condition is the brownfield
+        codebase-reasoning check (Req 3).
+      conditions:
+        - type: field_non_empty
+          field: design_doc.components
+          error: "Design names no components."
+        - type: field_non_empty
+          field: api_schema
+          error: "No API/schema definition produced."
+        - type: conditional_required
+          when: "run_context.mode == 'brownfield'"
+          field: impact_analysis.impacted_modules
+          error: >
+            Brownfield run with no impacted-module analysis. Every affected
+            module, API and data flow must be named, not guessed at.
+        - type: conditional_required
+          when: "design_doc.requires_schema_change == true"
+          field: migration_plan.rollback_sql
+          error: >
+            Schema change proposed with no rollback plan. A migration without a
+            documented reversal is an irreversible action by omission.
+        - type: high_impact_actions_flagged
+          field: design_doc.high_impact_actions
+          error: >
+            An action meeting DEC-0006 criteria was not flagged. The design
+            agent may propose high-impact work but may never conceal it.
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    rollback_action:
+      type: discard_artifacts
+      description: "Discard design artifacts; requirement spec is untouched."
+      artifacts: [design_doc, api_schema, impact_analysis, migration_plan]
+
+    # If the requirement changes, the design is no longer trustworthy.
+    re_plan_triggers:
+      - artifact: requirement_spec
+        on_change: mark_stale
+        reason: "Design is derived from the requirement; a changed requirement invalidates it."
+
+    metrics_tags: [stage:design, critical_path:true]
+
+  # ===========================================================================
+  # 3. APPLY MIGRATION  — conditional, human-gated
+  # ===========================================================================
+  # Present in the graph but SKIPPED unless the design declares a schema change.
+  # This is the node that demonstrates gate policy varying with actual risk:
+  # dormant in greenfield, active in the brownfield analytics scenario.
+  # ===========================================================================
+  - id: apply_migration
+    name: "Apply database migration"
+    agent_role: implementation_agent
+    depends_on: [design]
+    can_run_parallel: []
+
+    produces: [migration_applied]
+
+    condition:
+      description: "Only runs when the design actually requires a schema change."
+      expression: "design_doc.requires_schema_change == true"
+      if_false: SKIPPED
+
+    entry_gate:
+      description: "A migration may not run without a reviewed plan and a reversal."
+      conditions:
+        - type: artifact_present
+          artifact: migration_plan
+          error: "No migration plan."
+        - type: field_non_empty
+          field: migration_plan.rollback_sql
+          error: "Refusing to apply a migration with no rollback SQL."
+        - type: field_non_empty
+          field: migration_plan.forward_sql
+          error: "Migration plan contains no forward SQL."
+
+    exit_gate:
+      description: "Verify the schema actually reached the intended state."
+      conditions:
+        - type: schema_matches_expectation
+          field: migration_applied.resulting_schema
+          expected: migration_plan.expected_schema
+          error: "Post-migration schema does not match the plan."
+
+    # ---- THE GATE -----------------------------------------------------------
+    requires_human_approval: true
+    human_approval_reason: >
+      DEC-0006 criterion 2 (schema/data-shape change) and criterion 1
+      (irreversibility in practice: a migration against data cannot always be
+      cleanly reversed once writes have occurred). A human must review the
+      forward SQL, the rollback SQL, and the blast radius before any DDL runs.
+    approval_payload:
+      include:
+        - migration_plan.forward_sql
+        - migration_plan.rollback_sql
+        - impact_analysis.impacted_modules
+        - design_doc.high_impact_actions
+    # -------------------------------------------------------------------------
+
+    retry_policy:
+      max_attempts: 1                 # deliberately NO automatic retry
+      initial_interval_seconds: 0
+      backoff_coefficient: 1.0
+      max_interval_seconds: 0
+      non_retryable_errors: ["*"]     # every migration failure is permanent
+    retry_rationale: >
+      Blind-retrying a partially-applied DDL can compound damage. A failed
+      migration goes straight to rollback and then to a human.
+
+    rollback_action:
+      type: execute_sql
+      description: "Run the reviewed rollback SQL to restore the prior schema."
+      sql_from: migration_plan.rollback_sql
+      verify: schema_matches_expectation
+      on_rollback_failure: safe_stop_and_page
+      # If rollback itself fails the system STOPS. It does not improvise.
+
+    re_plan_triggers:
+      - artifact: migration_plan
+        on_change: mark_stale
+        reason: "A changed migration plan invalidates an applied migration."
+
+    metrics_tags: [stage:implementation, high_impact:true, gated:true]
+
+  # ===========================================================================
+  # 4. IMPLEMENTATION
+  # ===========================================================================
+  - id: implementation
+    name: "Code implementation"
+    agent_role: implementation_agent
+    depends_on: [design, apply_migration]
+    # apply_migration may be SKIPPED; the join treats SKIPPED as satisfied
+    # (it is a resolved, non-failed state) — see executor join semantics.
+    can_run_parallel: []
+
+    produces: [source_code]
+
+    entry_gate:
+      description: "Design must be complete, and any required migration settled."
+      conditions:
+        - type: artifact_present
+          artifact: design_doc
+          error: "No design to implement."
+        - type: artifact_present
+          artifact: api_schema
+          error: "No API contract to implement against."
+        - type: upstream_state_in
+          node: apply_migration
+          any_of: [COMPLETED, SKIPPED]
+          error: "Migration is neither applied nor skipped; schema state is unknown."
+
+    exit_gate:
+      description: "Code must be real, contract-conformant, and secret-free."
+      conditions:
+        - type: code_imports_cleanly
+          target: src/
+          error: "Source does not import/compile."
+        - type: api_contract_conformance
+          schema: api_schema
+          target: src/
+          error: "Implemented endpoints do not match the declared API schema."
+        - type: no_secrets_in_source
+          target: src/
+          error: "Credential or secret literal detected in source."
+        - type: no_unapproved_high_impact
+          error: >
+            A high-impact action was executed outside its gate. The
+            implementation agent stages such work; it never performs it.
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    rollback_action:
+      type: revert_filetree
+      description: "Restore src/ to its pre-node snapshot."
+      snapshot: source_code.pre_node_snapshot
+
+    re_plan_triggers:
+      - artifact: design_doc
+        on_change: mark_stale
+        reason: "Implementation follows the design."
+      - artifact: api_schema
+        on_change: mark_stale
+        reason: "A changed contract invalidates the code implementing it."
+
+    metrics_tags: [stage:implementation, critical_path:true]
+
+  # ===========================================================================
+  # 5. TESTING   ── parallel branch A ──
+  # ===========================================================================
+  - id: testing
+    name: "Unit and integration testing"
+    agent_role: testing_agent
+    depends_on: [implementation]
+    can_run_parallel: [documentation]     # ASSERTION, verified against Kahn frontier
+
+    produces: [test_suite, test_results]
+
+    entry_gate:
+      conditions:
+        - type: artifact_present
+          artifact: source_code
+          error: "No source code to test."
+        - type: field_non_empty
+          field: requirement_spec.acceptance_criteria
+          error: "No acceptance criteria to test against."
+
+    exit_gate:
+      description: >
+        The anti-gaming gate. An agent that can weaken tests to make them pass
+        has no critic, so coverage of acceptance criteria and test-count deltas
+        are checked explicitly (architecture.md §6.4, risk 4).
+      conditions:
+        - type: tests_executed
+          field: test_results
+          error: "Test suite did not actually run."
+        - type: all_tests_pass
+          field: test_results.failures
+          expect_empty: true
+          error: "Test failures present."
+        - type: acceptance_criteria_covered
+          criteria: requirement_spec.acceptance_criteria
+          results: test_results
+          error: "An acceptance criterion has no corresponding test."
+        - type: no_test_weakening
+          compare_to: previous_run.test_suite
+          error: >
+            Tests were deleted or assertions removed relative to the previous
+            run. Making the suite pass by lowering the bar is a gate breach.
+        - type: coverage_threshold
+          field: test_results.coverage_percent
+          min: 70
+          error: "Coverage below the declared 70% threshold."
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    retry_policy:
+      max_attempts: 3
+      initial_interval_seconds: 1
+      backoff_coefficient: 2.0
+      max_interval_seconds: 15
+      non_retryable_errors: [ValidationError, PolicyViolationError]
+    retry_rationale: >
+      Retrying is for FLAKY infrastructure, not for failing assertions. A
+      genuine test failure means the code is wrong: it re-plans implementation
+      via the feedback edge below rather than being retried into submission.
+
+    on_persistent_failure:
+      description: >
+        Distinguishes 'the tests are broken' from 'the code is broken'. Real
+        failures push work back to implementation instead of burning retries.
+      action: mark_upstream_stale
+      target: implementation
+      max_feedback_loops: 2       # bounded: prevents infinite design-build-test churn
+      then: rollback_then_safe_stop
+
+    rollback_action:
+      type: discard_artifacts
+      artifacts: [test_suite, test_results]
+
+    re_plan_triggers:
+      - artifact: source_code
+        on_change: mark_stale
+        reason: "Tests validate the code; changed code must be re-tested."
+      - artifact: requirement_spec
+        on_change: mark_stale
+        reason: "Changed acceptance criteria change what must be tested."
+
+    metrics_tags: [stage:testing, critical_path:true, parallel_branch:A]
+
+  # ===========================================================================
+  # 6. DOCUMENTATION   ── parallel branch B ──
+  # ===========================================================================
+  - id: documentation
+    name: "User and developer documentation"
+    agent_role: documentation_agent
+    depends_on: [implementation]
+    can_run_parallel: [testing]
+
+    produces: [documentation]
+
+    entry_gate:
+      conditions:
+        - type: artifact_present
+          artifact: source_code
+          error: "No implementation to document."
+        - type: artifact_present
+          artifact: api_schema
+          error: "No API schema to document."
+
+    exit_gate:
+      description: "Catch documentation drift — docs that describe code that isn't there."
+      conditions:
+        - type: documented_endpoints_exist
+          docs: documentation
+          source: src/
+          error: "Documentation describes endpoints absent from the code."
+        - type: setup_instructions_present
+          field: documentation.setup
+          error: "No setup instructions produced."
+        - type: no_contradictions
+          docs: documentation
+          schema: api_schema
+          error: "Documented behaviour contradicts the API schema."
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    rollback_action:
+      type: discard_artifacts
+      artifacts: [documentation]
+
+    re_plan_triggers:
+      - artifact: source_code
+        on_change: mark_stale
+        reason: "Docs describe the code; changed code means stale docs."
+      - artifact: api_schema
+        on_change: mark_stale
+        reason: "A changed contract invalidates the documented contract."
+
+    metrics_tags: [stage:documentation, critical_path:false, parallel_branch:B]
+
+  # ===========================================================================
+  # 7. RELEASE READINESS  — JOIN BARRIER + human gate
+  # ===========================================================================
+  - id: release_readiness
+    name: "Release readiness assessment"
+    agent_role: release_readiness_agent
+    depends_on: [testing, documentation]    # <-- fan-in / join barrier
+    can_run_parallel: []
+
+    produces: [readiness_report]
+
+    join_policy:
+      type: all_success
+      description: >
+        Fires only when BOTH branches are COMPLETED. If either failed
+        terminally, this node inherits upstream_failed and must NOT run — a
+        readiness verdict computed from partial inputs is worse than none.
+      on_upstream_failure: propagate_upstream_failed
+
+    entry_gate:
+      conditions:
+        - type: upstream_state
+          node: testing
+          equals: COMPLETED
+          error: "Testing incomplete; cannot assess readiness."
+        - type: upstream_state
+          node: documentation
+          equals: COMPLETED
+          error: "Documentation incomplete; cannot assess readiness."
+        - type: all_tests_pass
+          field: test_results.failures
+          expect_empty: true
+          error: "Refusing to assess readiness with failing tests."
+
+    exit_gate:
+      description: "The report must RECOMMEND, never DECIDE, and must be honest."
+      conditions:
+        - type: field_present
+          field: readiness_report.recommendation
+          allowed_values: [go, no_go, go_with_conditions]
+          error: "No go/no-go recommendation produced."
+        - type: field_non_empty
+          field: readiness_report.residual_risks
+          error: "No residual risks listed. 'No risks' is not a credible finding."
+        - type: field_non_empty
+          field: readiness_report.rationale
+          error: "Recommendation given without rationale."
+        - type: recommendation_consistent_with_evidence
+          recommendation: readiness_report.recommendation
+          evidence: [test_results, requirement_spec.acceptance_criteria]
+          error: >
+            Recommendation contradicts the evidence (e.g. 'go' with failing
+            tests or unmet acceptance criteria).
+
+    # ---- THE GATE -----------------------------------------------------------
+    requires_human_approval: true
+    human_approval_reason: >
+      DEC-0006 criterion 4 (release readiness). The agent may assess and
+      recommend; only a human may declare software fit to ship. This is the
+      assignment's controlled-autonomy principle made executable: the run
+      CANNOT reach a terminal success state without a recorded human decision.
+    approval_payload:
+      include:
+        - readiness_report.recommendation
+        - readiness_report.rationale
+        - readiness_report.residual_risks
+        - test_results.summary
+        - requirement_spec.acceptance_criteria
+    # -------------------------------------------------------------------------
+
+    retry_policy:
+      max_attempts: 2
+      initial_interval_seconds: 1
+      backoff_coefficient: 2.0
+      max_interval_seconds: 10
+      non_retryable_errors: [HumanRejectedError]
+
+    rollback_action:
+      type: discard_artifacts
+      description: >
+        Discard the report only. Rollback here never reverts code, tests or
+        docs — a rejected readiness assessment means 'not yet', not 'undo the
+        work'.
+      artifacts: [readiness_report]
+
+    re_plan_triggers:
+      - artifact: test_results
+        on_change: mark_stale
+        reason: "Readiness is a function of test outcomes."
+      - artifact: documentation
+        on_change: mark_stale
+        reason: "Readiness requires current documentation."
+      - artifact: source_code
+        on_change: mark_stale
+        reason: "Any code change invalidates a prior readiness assessment."
+
+    metrics_tags: [stage:release, critical_path:true, high_impact:true, gated:true]
+
+# =============================================================================
+# Graph-level policy
+# =============================================================================
+policy:
+
+  # Mirrors DEC-0006. The executor cross-checks every node's declared
+  # `requires_human_approval` against these criteria at load time and FAILS on
+  # disagreement, so the YAML and the policy code cannot silently drift.
+  high_impact_criteria:
+    - id: irreversible
+      description: "Cannot be automatically undone by a rollback action."
+    - id: schema_change
+      description: "Any DDL: migration, table/column create or alter, index change."
+    - id: deletion
+      description: "Removal of any file, table, record or artifact."
+    - id: release_readiness
+      description: "Any assertion that software is fit to ship."
+    - id: production_surface
+      description: "Production config, secrets, credentials, network exposure."
+
+  pre_approved_actions:
+    - read_any_artifact
+    - write_source_in_src
+    - write_and_run_tests_in_sandbox
+    - generate_documentation
+    - produce_analysis
+    - retry_within_policy
+
+  safe_stop:
+    description: >
+      Terminal fallback when retries are exhausted and rollback cannot restore
+      a good state. Halts the run with full state persisted and the failure
+      surfaced. Deliberately NOT 'continue without it': proceeding past an
+      unrecoverable stage would yield a readiness verdict based on work that
+      never happened.
+    actions:
+      - persist_state
+      - write_lineage_entry
+      - finalise_metrics
+      - write_safe_stop_report
+      - exit_nonzero
+
+  re_planning:
+    description: >
+      Staleness propagation (Dagster model). Unaffected nodes KEEP their state
+      and lineage — re-planning must not erase governance history.
+    algorithm: transitive_descendants_intersect_triggers
+    preserve_lineage: true
+    invalidate_approvals_for_changed_artifacts: true   # approval binds to artifact_ref
+    max_replan_cycles: 3
+    on_max_cycles_exceeded: safe_stop
+
+  observability:
+    correlation:
+      run_id: required          # ≈ W3C trace_id
+      node_id: required         # ≈ span
+      attempt: required         # disambiguates retries
+    lineage_file: "runs/{run_id}/lineage.jsonl"      # append-only
+    state_file: "runs/{run_id}/state.json"           # atomic rewrite
+    metrics_file: "runs/{run_id}/metrics.json"
+    cumulative_metrics_file: "runs/metrics-cumulative.json"
+    pending_approval_file: "runs/{run_id}/pending_approval.json"
+
+  metrics:
+    success_rate:
+      formula: "nodes_completed / nodes_attempted"
+      note: "upstream_failed is counted separately, never as a node's own failure."
+    retry_frequency:
+      formula: "total_retry_attempts / nodes_attempted"
+    rollback_frequency:
+      formula: "rollbacks_executed / nodes_attempted"
+    mttr:
+      definition: "mean_time_to_recovery"
+      clock_start: "node enters FAILED"
+      clock_stop: "node reaches COMPLETED via retry, or rollback completes"
+      note: >
+        'MTTR' is four different metrics; this is explicitly time-to-RECOVERY,
+        the only one fully observable from inside the orchestrator.
+    end_to_end_latency:
+      formula: "run_terminal_at - run_started_at"
+      breakdown: [time_running, time_blocked_on_gate, time_retrying]
+      note: "Human wait time is separated so it never masquerades as slow execution."

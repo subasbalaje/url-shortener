@@ -1,0 +1,107 @@
+# Minimal but structurally rich fixture: exercises gates (with extra checker
+# params), a non-default retry policy, a rollback action, and a re-plan trigger —
+# without dragging in the full 7-node real graph. See docs/orchestration-graph.yaml
+# for the authoritative, full-size graph (loaded separately in GraphLoaderTest's
+# real-graph integration test).
+schema_version: "1.0"
+
+graph:
+  id: "fixture-graph"
+  name: "Fixture graph for GraphLoader tests"
+  description: "A small graph exercising every YAML shape GraphLoader must map."
+  defaults:
+    retry_policy:
+      max_attempts: 3
+      initial_interval_seconds: 2
+      backoff_coefficient: 2.0
+      max_interval_seconds: 60
+      non_retryable_errors:
+        - ValidationError
+        - PolicyViolationError
+        - HumanRejectedError
+    timeout_seconds: 600
+    on_exhausted: "rollback_then_safe_stop"
+  artifacts:
+    requirement_spec: { produced_by: requirements, type: json }
+    design_doc:        { produced_by: design, type: markdown }
+
+nodes:
+  - id: requirements
+    name: "Requirements"
+    agent_role: requirements_agent
+    depends_on: []
+    can_run_parallel: []
+    produces: [requirement_spec]
+
+    entry_gate:
+      description: "A raw request must be present."
+      conditions:
+        - type: input_present
+          field: raw_request
+          error: "No requirement supplied."
+
+    exit_gate:
+      description: "Must produce testable acceptance criteria."
+      conditions:
+        - type: field_non_empty
+          field: requirement_spec.acceptance_criteria
+          error: "No acceptance criteria."
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    retry_policy:
+      max_attempts: 2
+      initial_interval_seconds: 1
+      backoff_coefficient: 2.0
+      max_interval_seconds: 10
+      non_retryable_errors: [PolicyViolationError, HumanRejectedError]
+
+    rollback_action:
+      type: escalate_to_human
+      description: "Surface unresolved ambiguity to a human."
+      writes: pending_clarification.json
+
+    re_plan_triggers: []
+
+    metrics_tags: [stage:requirements, critical_path:true]
+
+  - id: design
+    name: "Design"
+    agent_role: design_agent
+    depends_on: [requirements]
+    can_run_parallel: []
+    produces: [design_doc]
+
+    entry_gate:
+      description: "Requires a normalised requirement."
+      conditions:
+        - type: artifact_present
+          artifact: requirement_spec
+          error: "Cannot design without a normalised requirement."
+        - type: upstream_state
+          node: requirements
+          equals: COMPLETED
+          error: "Requirements node has not passed its exit gate."
+
+    exit_gate:
+      description: "Design must name components."
+      conditions:
+        - type: field_non_empty
+          field: design_doc.components
+          error: "Design names no components."
+
+    requires_human_approval: false
+    human_approval_reason: null
+
+    rollback_action:
+      type: discard_artifacts
+      description: "Discard design artifacts."
+      artifacts: [design_doc]
+
+    re_plan_triggers:
+      - artifact: requirement_spec
+        on_change: mark_stale
+        reason: "Design is derived from the requirement."
+
+    metrics_tags: [stage:design, critical_path:true]

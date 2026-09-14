@@ -1,0 +1,28 @@
+# Run artifacts — per-run state, lineage, metrics, approvals
+runs/
+
+# Java / Maven (DEC-0012)
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/
+.factorypath
+.classpath
+.project
+.settings/
+
+# Databases (the shortener's SQLite file)
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment / secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

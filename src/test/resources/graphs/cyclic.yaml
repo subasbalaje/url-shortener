@@ -1,0 +1,15 @@
+# requirements -> design -> requirements: a two-node cycle.
+schema_version: "1.0"
+graph:
+  id: "cyclic-fixture"
+  name: "Cyclic fixture"
+  artifacts: {}
+nodes:
+  - id: requirements
+    name: "Requirements"
+    agent_role: requirements_agent
+    depends_on: [design]
+  - id: design
+    name: "Design"
+    agent_role: design_agent
+    depends_on: [requirements]

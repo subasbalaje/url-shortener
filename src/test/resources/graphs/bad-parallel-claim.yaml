@@ -1,0 +1,22 @@
+# testing and documentation both claim can_run_parallel with each other, but
+# documentation ALSO depends on testing -- the dangerous edit DEC-0011 exists to
+# catch (a dependency added between two nodes still flagged as parallel).
+schema_version: "1.0"
+graph:
+  id: "bad-parallel-claim-fixture"
+  name: "Bad parallel claim fixture"
+  artifacts: {}
+nodes:
+  - id: implementation
+    name: "Implementation"
+    agent_role: implementation_agent
+  - id: testing
+    name: "Testing"
+    agent_role: testing_agent
+    depends_on: [implementation]
+    can_run_parallel: [documentation]
+  - id: documentation
+    name: "Documentation"
+    agent_role: documentation_agent
+    depends_on: [implementation, testing]
+    can_run_parallel: [testing]

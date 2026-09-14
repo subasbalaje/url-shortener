@@ -1,0 +1,11 @@
+# 'design' depends_on a node id that does not exist.
+schema_version: "1.0"
+graph:
+  id: "dangling-dep-fixture"
+  name: "Dangling dependency fixture"
+  artifacts: {}
+nodes:
+  - id: design
+    name: "Design"
+    agent_role: design_agent
+    depends_on: [requirements]

@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Agentic SDLC Orchestrator — Maven build.
+
+  Two things live in this one module (DEC-0012's decisive factor: one language,
+  and for now one build, spans both layers):
+    - orchestrator/  the deliverable graph engine   (com.sdlc.orchestrator)
+    - shortener/     the URL shortener test subject (com.sdlc.shortener)
+
+  No preview-feature flag anywhere (DEC-0013) — everything here must build and
+  test on a stock JDK 21 LTS.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.4</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.sdlc</groupId>
+  <artifactId>agentic-sdlc-orchestrator</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>Agentic SDLC Orchestrator</name>
+  <description>
+    Graph-based SDLC orchestration engine (entry/exit gates, human approval
+    checkpoints, bounded retry/rollback/safe-stop, decision lineage, reliability
+    metrics), demonstrated by building and evolving a URL shortener.
+  </description>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!-- Pinned explicitly (not left to Spring Boot's managed version) so the
+         graph parser's version is a deliberate choice, not an incidental one. -->
+    <snakeyaml.version>2.2</snakeyaml.version>
+    <sqlite-jdbc.version>3.46.1.3</sqlite-jdbc.version>
+    <springdoc.version>2.6.0</springdoc.version>
+
+    <!-- jacoco-maven-plugin threshold — matches the coverage_threshold gate
+         (docs/orchestration-graph.yaml, testing node exit gate) and the 70%
+         figure in tests/README.md. -->
+    <coverage.minimum>0.70</coverage.minimum>
+  </properties>
+
+  <dependencies>
+    <!-- ==================== Web / API ==================== -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <!-- Generated OpenAPI from controller annotations — replaces FastAPI's
+           automatic schema generation (DEC-0012). The spec is derived from the
+           code, so it cannot drift from what the endpoints actually do. -->
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>${springdoc.version}</version>
+    </dependency>
+
+    <!-- ==================== Storage ==================== -->
+    <dependency>
+      <!-- Plain JDBC driver — deliberately no JPA/Hibernate (src/README.md):
+           an ORM's auto-DDL would hide exactly the schema change the
+           apply_migration human gate exists to review. -->
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+      <version>${sqlite-jdbc.version}</version>
+    </dependency>
+
+    <!-- ==================== Graph parsing ==================== -->
+    <dependency>
+      <groupId>org.yaml</groupId>
+      <artifactId>snakeyaml</artifactId>
+      <version>${snakeyaml.version}</version>
+    </dependency>
+
+    <!-- Jackson is already brought in transitively by spring-boot-starter-web;
+         declared explicitly because state.json/lineage.jsonl/metrics.json
+         serialization is a core orchestrator concern, not incidental to the
+         web layer. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <!-- ==================== Test scope ==================== -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>${project.artifactId}</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <!-- The shortener is the runnable Spring Boot app. The orchestrator
+               CLI (cli.OrchestratorCli, build-order step 10 — not yet created)
+               is a separate plain-Java entry point and will get its own
+               executable-jar packaging (maven-assembly-plugin execution)
+               alongside this one once it exists; it does not need Spring's
+               web container. -->
+          <mainClass>com.sdlc.ShortenerApplication</mainClass>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+      </plugin>
+
+      <plugin>
+        <!-- 70% line coverage on the orchestrator packages — matches the
+             coverage_threshold gate. Coverage is a floor, not the goal: the 18
+             assertions in docs/example-run.md §9 matter more than the number
+             (tests/README.md). -->
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.12</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>check-orchestrator-coverage</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>com/sdlc/orchestrator/**</include>
+              </includes>
+              <rules>
+                <rule>
+                  <element>BUNDLE</element>
+                  <limits>
+                    <limit>
+                      <counter>LINE</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>${coverage.minimum}</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

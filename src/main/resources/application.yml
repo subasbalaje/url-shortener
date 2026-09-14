@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: agentic-sdlc-orchestrator-shortener
+  threads:
+    virtual:
+      enabled: true # DEC-0013
+
+server:
+  port: 8080
+
+shortener:
+  db-path: shortener.db
+  own-host: localhost:8080
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    root: INFO

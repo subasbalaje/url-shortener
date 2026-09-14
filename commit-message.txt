@@ -1,0 +1,39 @@
+Initial scaffold: agentic SDLC orchestrator design and skeleton
+
+Design and structural scaffold for a graph-based SDLC orchestration
+engine, plus the URL shortener it will build as its test subject.
+
+Orchestrator (the deliverable):
+- docs/orchestration-graph.yaml: 7-node SDLC DAG as data, with
+  entry/exit gates, retry policy, rollback actions and re-plan
+  triggers declared per node. Verified acyclic.
+- orchestrator/: graph_model, executor, gates, decision_log, metrics
+  as structural skeletons. Dataclasses, enums, signatures and control
+  flow are final; bodies are TODO(impl).
+- Parallel wave (testing || documentation) and the release-readiness
+  join barrier are derived from the edge set, not declared.
+
+Governance:
+- Human gates persist-and-exit at node boundaries, so a pause survives
+  process death and is inspectable on disk (DEC-0007).
+- Five structural high-impact criteria gate approvals (DEC-0006);
+  greenfield yields 1 gate, brownfield 2.
+- Approvals bind to artifact content hashes, so re-planning invalidates
+  approvals for changed artifacts rather than inheriting them.
+- Lineage is append-only by construction.
+
+Docs:
+- research-notes.md: sourced survey of 8 workflow engines, graph
+  theory, HITL patterns, SRE metrics and URL shortener fundamentals,
+  each with what we borrow and what we reject.
+- decision-log.md: DEC-0001..DEC-0011 with alternatives and rationale.
+- example-run.md: worked trace including failure ladder and
+  re-planning, doubling as an 18-assertion test spec.
+- Three scenarios with genuinely different graph traversals.
+
+Status: specified and scaffolded; not yet runnable end to end.
+orchestrator/README.md tracks per-file status and build order.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qadof1Js6y8W3ToiauboCJ
+
