@@ -6,6 +6,7 @@ import com.sdlc.shortener.service.ValidationService;
 import com.sdlc.shortener.store.LinkStore;
 import com.sdlc.shortener.store.SqliteLinkStore;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Primary;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.sqlite.SQLiteDataSource;
@@ -33,6 +34,7 @@ public class AppConfig {
     }
 
     @Bean
+    @Primary
     public LinkStore linkStore(DataSource dataSource) {
         SqliteLinkStore store = new SqliteLinkStore(dataSource);
         store.initSchema(); // first-time setup, not a migration -- see V1__init.sql
